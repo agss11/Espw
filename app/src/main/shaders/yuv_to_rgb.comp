@@ -1,0 +1,88 @@
+// Vulkan Compute Shader: YUV_420_888 → RGB 320x320
+// 使用 uint buffer 按字节操作，兼容所有 Android Vulkan 设备
+//
+// 编译: glslangValidator -V yuv_to_rgb.comp -o yuv_to_rgb.spv
+
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16) in;
+
+// YUV 平面作为 byte buffer (用 uint 读取再提取字节)
+layout(set = 0, binding = 0) readonly buffer YPlane  { uint yPacked[]; };
+layout(set = 0, binding = 1) readonly buffer UVPlane { uint uvPacked[]; };  // NV21 交错 UV
+
+// 输出 RGB: 320*320*3 bytes，打包为 uint
+layout(set = 0, binding = 2) writeonly buffer OutputRGB { uint rgbPacked[]; };
+
+layout(push_constant) uniform Params {
+    uint srcWidth;
+    uint srcHeight;
+    uint dstSize;       // 320
+    uint yRowStride;
+    uint uvRowStride;
+};
+
+// 从 byte buffer 读取单个字节
+uint readByte(uint index, uint stride, uint base) {
+    // 这里简化：直接从字节偏移计算 uint 索引
+    // 实际上我们把整个 YUV 数据作为连续 byte 传入
+    return 0; // placeholder - 实际在 C++ 端直接操作内存
+}
+
+void main() {
+    uint dstX = gl_GlobalInvocationID.x;
+    uint dstY = gl_GlobalInvocationID.y;
+
+    if (dstX >= dstSize || dstY >= dstSize) return;
+
+    // 缩放映射
+    float scaleX = float(srcWidth) / float(dstSize);
+    float scaleY = float(srcHeight) / float(dstSize);
+    uint srcX = uint(float(dstX) * scaleX);
+    uint srcY = uint(float(dstY) * scaleY);
+
+    // Y 平面: 按 uint 打包读取 (4 bytes per uint)
+    uint yByteIdx = srcY * yRowStride + srcX;
+    uint yWordIdx = yByteIdx >> 2;
+    uint yByteOff = yByteIdx & 3u;
+    float y = float((yPacked[yWordIdx] >> (yByteOff * 8u)) & 0xFFu);
+
+    // UV 平面 (NV21 交错): VUVU...
+    uint uvRow = srcY >> 1;
+    uint uvCol = srcX & ~1u;  // 对齐到偶数
+    uint uvByteIdx = uvRow * uvRowStride + uvCol;
+    uint uvWordIdx = uvByteIdx >> 2;
+    uint uvByteOff = uvByteIdx & 3u;
+
+    uint uvWord = uvPacked[uvWordIdx];
+    float v = float((uvWord >> (uvByteOff * 8u)) & 0xFFu);
+    float u = float((uvWord >> ((uvByteOff + 1u) * 8u)) & 0xFFu);
+
+    // YUV → RGB (BT.601)
+    float r = y + 1.402 * (v - 128.0);
+    float g = y - 0.344136 * (u - 128.0) - 0.714136 * (v - 128.0);
+    float b = y + 1.772 * (u - 128.0);
+
+    r = clamp(r, 0.0, 255.0);
+    g = clamp(g, 0.0, 255.0);
+    b = clamp(b, 0.0, 255.0);
+
+    // 输出: 3 bytes per pixel, 打包到 uint buffer
+    uint outByteIdx = (dstY * dstSize + dstX) * 3u;
+    uint outWordIdx = outByteIdx >> 2;
+    uint outByteOff = outByteIdx & 3u;
+
+    // 逐字节写入 (使用 atomicOr 避免竞争)
+    atomicOr(rgbPacked[outWordIdx], uint(r) << (outByteOff * 8u));
+    if (outByteOff + 1u < 4u) {
+        atomicOr(rgbPacked[outWordIdx], uint(g) << ((outByteOff + 1u) * 8u));
+    } else {
+        atomicOr(rgbPacked[outWordIdx + 1u], uint(g));
+    }
+    if (outByteOff + 2u < 4u) {
+        atomicOr(rgbPacked[outWordIdx], uint(b) << ((outByteOff + 2u) * 8u));
+    } else {
+        uint bOff = (outByteOff + 2u) - 4u;
+        atomicOr(rgbPacked[outWordIdx + 1u], uint(b) << (bOff * 8u));
+    }
+}
