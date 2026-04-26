@@ -310,7 +310,7 @@ public class CameraHelper {
         Log.i(TAG, "AE FPS range dipilih: " + best + " untuk target " + targetFps);
     }
 
-
+    private void applyZoom(CaptureRequest.Builder builder) {
         if (sensorArraySize == null) return;
 
         // 硬件变焦：限制到硬件最大值
